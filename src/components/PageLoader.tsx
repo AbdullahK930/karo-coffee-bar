@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { motion, AnimatePresence, useReducedMotion } from "motion/react";
+import { useReducedMotion } from "motion/react";
 import { useMounted } from "@/lib/useMounted";
-
-const easeOut = [0.16, 1, 0.3, 1] as const;
+import { lockScroll, unlockScroll } from "@/lib/lenisLock";
 
 export function PageLoader() {
   const reduce = useReducedMotion();
@@ -13,7 +12,9 @@ export function PageLoader() {
   const [loaded, setLoaded] = useState(
     () => typeof document !== "undefined" && document.readyState === "complete",
   );
-  const [done, setDone] = useState(false);
+  const [fadingOut, setFadingOut] = useState(false);
+  const [unmounted, setUnmounted] = useState(false);
+  const [entered, setEntered] = useState(false);
 
   // Skip only decides true once mounted, so server and first client paint
   // always render the same (full loader) tree — no hydration mismatch.
@@ -22,20 +23,29 @@ export function PageLoader() {
   useEffect(() => {
     if (skip) return;
 
-    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    lockScroll();
 
-    let raf = 0;
+    // setInterval rather than requestAnimationFrame: rAF is fully suspended
+    // in a hidden tab (e.g. opened in the background, or the user alt-tabs
+    // away mid-load), which would freeze progress indefinitely. Timers are
+    // only throttled, never suspended, so this keeps converging regardless
+    // of tab visibility.
     const start = performance.now();
-    const tick = (now: number) => {
+    let last = start;
+    const interval = setInterval(() => {
+      const now = performance.now();
       const elapsed = now - start;
+      const dt = (now - last) / 1000;
+      last = now;
       const ceiling = loaded ? 100 : Math.min(88, (elapsed / 2200) * 88);
+      // Time-based (not per-tick) exponential approach, so convergence
+      // stays bounded in wall-clock time regardless of tick rate.
       setProgress((p) => {
-        const next = p + (ceiling - p) * 0.12;
+        const next = ceiling - (ceiling - p) * Math.exp(-6 * dt);
         return next > 99.3 ? 100 : next;
       });
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
+    }, 80);
 
     const onLoad = () => setLoaded(true);
     if (!loaded) {
@@ -43,59 +53,75 @@ export function PageLoader() {
     }
 
     return () => {
-      cancelAnimationFrame(raf);
+      clearInterval(interval);
       window.removeEventListener("load", onLoad);
-      document.body.style.overflow = "";
+      document.documentElement.style.overflow = "";
+      unlockScroll();
     };
   }, [skip, loaded]);
 
   useEffect(() => {
     if (skip || progress < 100) return;
     const timeout = setTimeout(() => {
-      setDone(true);
-      document.body.style.overflow = "";
+      setFadingOut(true);
+      document.documentElement.style.overflow = "";
+      unlockScroll();
     }, 350);
     return () => clearTimeout(timeout);
   }, [progress, skip]);
 
-  if (skip) return null;
+  // Plain CSS transition + setTimeout-driven unmount rather than a
+  // Motion AnimatePresence exit: Motion's exit-completion tracking relies on
+  // requestAnimationFrame, which — like the progress ticker above — is
+  // suspended in a hidden tab and would leave the overlay stuck. setTimeout
+  // keeps firing regardless, so the fade always finishes and unmounts.
+  useEffect(() => {
+    if (!fadingOut) return;
+    const timeout = setTimeout(() => setUnmounted(true), 650);
+    return () => clearTimeout(timeout);
+  }, [fadingOut]);
+
+  // Two-step mount so the entrance transition actually runs (the browser
+  // needs a frame between the initial "not entered" paint and toggling the
+  // transitioned classes) — a native setTimeout(0), not rAF, so it's
+  // unaffected by tab-visibility throttling.
+  useEffect(() => {
+    if (skip) return;
+    const timeout = setTimeout(() => setEntered(true), 0);
+    return () => clearTimeout(timeout);
+  }, [skip]);
+
+  if (skip || unmounted) return null;
 
   return (
-    <AnimatePresence>
-      {!done && (
-        <motion.div
-          initial={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.6, ease: easeOut }}
-          className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-bg"
-        >
-          <motion.div
-            initial={{ opacity: 0, scale: 0.92 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.7, ease: easeOut }}
-            className="h-20 w-20"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="/images/logo-mark.png"
-              alt="Káro Coffee Bar"
-              className="h-full w-full rounded-full object-contain"
-            />
-          </motion.div>
+    <div
+      className={`fixed inset-0 z-[100] flex flex-col items-center justify-center bg-bg transition-opacity duration-[600ms] ease-out ${
+        fadingOut ? "opacity-0" : "opacity-100"
+      }`}
+    >
+      <div
+        className={`h-20 w-20 transition-all duration-700 ease-out ${
+          entered ? "scale-100 opacity-100" : "scale-90 opacity-0"
+        }`}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/images/logo-mark.png"
+          alt="Káro Coffee Bar"
+          className="h-full w-full rounded-full object-contain"
+        />
+      </div>
 
-          <div className="mt-8 h-px w-40 overflow-hidden rounded-full bg-border">
-            <motion.div
-              className="h-full rounded-full"
-              style={{ width: `${progress}%`, background: "var(--gradient-brand)" }}
-              transition={{ ease: "linear" }}
-            />
-          </div>
+      <div className="mt-8 h-px w-40 overflow-hidden rounded-full bg-border">
+        <div
+          className="h-full rounded-full"
+          style={{ width: `${progress}%`, background: "var(--gradient-brand)" }}
+        />
+      </div>
 
-          <p className="mt-4 font-mono text-[11px] tracking-[0.2em] text-text-muted">
-            {Math.round(progress)}%
-          </p>
-        </motion.div>
-      )}
-    </AnimatePresence>
+      <p className="mt-4 font-mono text-[11px] tracking-[0.2em] text-text-muted">
+        {Math.round(progress)}%
+      </p>
+    </div>
   );
 }

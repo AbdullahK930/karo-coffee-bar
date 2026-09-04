@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import Lenis from "lenis";
 import { frame, cancelFrame, useReducedMotion } from "motion/react";
+import { registerLenis, unregisterLenis } from "@/lib/lenisLock";
 
 export function SmoothScroll() {
   const reduce = useReducedMotion();
@@ -14,6 +15,7 @@ export function SmoothScroll() {
       duration: 1.1,
       easing: (t) => 1 - Math.pow(1 - t, 3),
     });
+    registerLenis(lenis);
 
     function update(data: { timestamp: number }) {
       lenis.raf(data.timestamp);
@@ -22,6 +24,7 @@ export function SmoothScroll() {
 
     return () => {
       cancelFrame(update);
+      unregisterLenis();
       lenis.destroy();
     };
   }, [reduce]);
